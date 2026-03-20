@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feishu Voice Reply"
+  short_description: "Send Feishu audio bubbles from TTS output"
+  default_prompt: "Use $feishu-tts to first offer a local environment check, then convert generated speech to OPUS and send it as a Feishu audio message."
