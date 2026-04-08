@@ -141,6 +141,7 @@ Upload the converted file to `/open-apis/im/v1/files` with:
 
 - `file_type=opus`
 - `file_name=<something>.opus`
+- `duration=<milliseconds>` so Feishu can show the correct audio length
 - multipart file body
 
 Capture `data.file_key` from the response.

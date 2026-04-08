@@ -7,6 +7,7 @@ import argparse
 from dataclasses import dataclass
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -136,6 +137,7 @@ def deliver_audio_file(*, input_path: Path, options: DeliveryOptions) -> dict[st
         keep_opus=options.keep_opus,
     )
     convert_to_opus(resolved_input_path, opus_path)
+    duration_ms = probe_duration_ms(opus_path)
 
     try:
         tenant_access_token = resolve_tenant_access_token(
@@ -152,6 +154,7 @@ def deliver_audio_file(*, input_path: Path, options: DeliveryOptions) -> dict[st
             tenant_access_token=tenant_access_token,
             opus_path=opus_path,
             file_name=file_name,
+            duration_ms=duration_ms,
             timeout=options.request_timeout,
         )
         return send_audio_message(
@@ -222,6 +225,65 @@ def normalize_opus_file_name(file_name: str) -> str:
     return f"{path.stem}.opus"
 
 
+def probe_duration_ms(audio_path: Path) -> int | None:
+    ffprobe_path = shutil.which("ffprobe")
+    if ffprobe_path is not None:
+        cmd = [
+            ffprobe_path,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(audio_path),
+        ]
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode == 0:
+            duration_ms = duration_seconds_to_ms(completed.stdout.strip())
+            if duration_ms is not None:
+                return duration_ms
+
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path is None:
+        return None
+
+    completed = subprocess.run(
+        [ffmpeg_path, "-i", str(audio_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", completed.stderr)
+    if not match:
+        return None
+
+    hours = int(match.group(1))
+    minutes = int(match.group(2))
+    seconds = float(match.group(3))
+    total_seconds = hours * 3600 + minutes * 60 + seconds
+    return duration_seconds_to_ms(str(total_seconds))
+
+
+def duration_seconds_to_ms(raw_duration: str) -> int | None:
+    if not raw_duration:
+        return None
+
+    try:
+        duration_seconds = float(raw_duration)
+    except ValueError:
+        return None
+
+    if duration_seconds <= 0:
+        return None
+    return max(1, int(round(duration_seconds * 1000)))
+
+
 def resolve_tenant_access_token(
     *,
     tenant_access_token: str | None = None,
@@ -285,14 +347,19 @@ def upload_opus(
     tenant_access_token: str,
     opus_path: Path,
     file_name: str,
+    duration_ms: int | None = None,
     timeout: float = DEFAULT_REQUEST_TIMEOUT,
 ) -> str:
+    fields = {
+        "file_type": "opus",
+        "file_name": file_name,
+    }
+    if duration_ms is not None:
+        fields["duration"] = str(duration_ms)
+
     response = post_multipart(
         f"{base_url}/open-apis/im/v1/files",
-        fields={
-            "file_type": "opus",
-            "file_name": file_name,
-        },
+        fields=fields,
         file_field_name="file",
         file_path=opus_path,
         upload_file_name=file_name,

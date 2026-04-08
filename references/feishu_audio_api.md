@@ -28,6 +28,7 @@ Multipart form fields:
 
 - `file_type=opus`
 - `file_name=<name>.opus`
+- `duration=<milliseconds>` for audio/video so Feishu can show the correct length
 - `file=@/path/to/output.opus`
 
 Expected response field:

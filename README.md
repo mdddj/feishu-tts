@@ -91,7 +91,7 @@ Generate speech locally with that skill, then send the generated audio to Feishu
 ## Feishu Flow
 
 1. Convert source audio to OPUS with `ffmpeg`
-2. Upload via `POST /open-apis/im/v1/files` using `file_type=opus`
+2. Upload via `POST /open-apis/im/v1/files` using `file_type=opus` and `duration=<ms>`
 3. Send via `POST /open-apis/im/v1/messages` using `msg_type=audio`
 
 ## Notes
