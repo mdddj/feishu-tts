@@ -63,7 +63,21 @@ def main() -> int:
         "LARK_APP_SECRET",
     ]
     for name in env_names:
-        rows.append((name, bool(os.environ.get(name)), "set" if os.environ.get(name) else "not set"))
+        value = os.environ.get(name)
+        rows.append((name, bool(value), render_env_detail(name, value)))
+
+    optional_tts_env_names = [
+        "TTS_API_URL",
+        "TTS_API_KEY",
+        "OPENAI_API_KEY",
+        "TTS_MODEL",
+        "TTS_VOICE",
+        "TTS_RESPONSE_FORMAT",
+        "CHATTTS_URL",
+    ]
+    for name in optional_tts_env_names:
+        value = os.environ.get(name)
+        rows.append((f"optional {name}", bool(value), render_env_detail(name, value)))
 
     config_summary = inspect_config(DEFAULT_CONFIG_PATH) if config_exists else None
 
@@ -103,7 +117,7 @@ def main() -> int:
 
 def inspect_config(config_path: Path) -> str:
     try:
-        config = json.loads(config_path.read_text())
+        config = json.loads(config_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return "openclaw.json exists but is not valid JSON"
 
@@ -114,6 +128,14 @@ def inspect_config(config_path: Path) -> str:
     app_id = "present" if feishu.get("appId") else "missing"
     app_secret = "present" if feishu.get("appSecret") else "missing"
     return f"channels.feishu.appId={app_id}, channels.feishu.appSecret={app_secret}"
+
+
+def render_env_detail(name: str, value: str | None) -> str:
+    if not value:
+        return "not set"
+    if any(marker in name for marker in ("KEY", "TOKEN", "SECRET")):
+        return "set"
+    return value
 
 
 def has_any_feishu_env() -> bool:
