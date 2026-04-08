@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 import os
 import shutil
@@ -18,10 +19,28 @@ from urllib import error, parse, request
 
 FEISHU_BASE_URL = "https://open.feishu.cn"
 DEFAULT_CONFIG_PATH = "~/.openclaw-autoclaw/openclaw.json"
+DEFAULT_REQUEST_TIMEOUT = 30.0
 
 
 class FeishuAudioError(RuntimeError):
     """Raised when the Feishu audio flow fails."""
+
+
+@dataclass(frozen=True)
+class DeliveryOptions:
+    """Options shared by audio-file and text-to-speech delivery flows."""
+
+    receive_id: str
+    receive_id_type: str = "chat_id"
+    tenant_access_token: str | None = None
+    app_id: str | None = None
+    app_secret: str | None = None
+    config_path: str = DEFAULT_CONFIG_PATH
+    file_name: str | None = None
+    opus_path: Path | None = None
+    keep_opus: bool = False
+    base_url: str = FEISHU_BASE_URL
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -71,55 +90,102 @@ def build_parser() -> argparse.ArgumentParser:
         default=FEISHU_BASE_URL,
         help="Override the Feishu API base URL if required.",
     )
+    parser.add_argument(
+        "--request-timeout",
+        type=float,
+        default=DEFAULT_REQUEST_TIMEOUT,
+        help="HTTP timeout in seconds for Feishu API requests.",
+    )
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
+    input_path = Path(args.input)
+    options = DeliveryOptions(
+        receive_id=args.receive_id,
+        receive_id_type=args.receive_id_type,
+        tenant_access_token=args.tenant_access_token,
+        app_id=args.app_id,
+        app_secret=args.app_secret,
+        config_path=args.config,
+        file_name=args.file_name,
+        opus_path=Path(args.opus_path).expanduser().resolve() if args.opus_path else None,
+        keep_opus=args.keep_opus,
+        base_url=args.base_url,
+        request_timeout=args.request_timeout,
+    )
+    response = deliver_audio_file(input_path=input_path, options=options)
+    print(json.dumps(response, ensure_ascii=False, indent=2))
+    return 0
 
-    input_path = Path(args.input).expanduser().resolve()
-    if not input_path.is_file():
-        raise FeishuAudioError(f"Input audio file not found: {input_path}")
+
+def deliver_audio_file(*, input_path: Path, options: DeliveryOptions) -> dict[str, Any]:
+    """Convert a local audio file and send it as a Feishu voice bubble."""
+
+    resolved_input_path = Path(input_path).expanduser().resolve()
+    if not resolved_input_path.is_file():
+        raise FeishuAudioError(f"Input audio file not found: {resolved_input_path}")
     if shutil.which("ffmpeg") is None:
         raise FeishuAudioError("ffmpeg is required but was not found in PATH.")
 
-    cleanup_opus = False
-    opus_path = resolve_opus_path(args, input_path)
-    if not args.opus_path:
-        cleanup_opus = not args.keep_opus
-
-    convert_to_opus(input_path, opus_path)
+    base_url = normalize_base_url(options.base_url)
+    opus_path, cleanup_opus = resolve_opus_path(
+        input_path=resolved_input_path,
+        explicit_opus_path=options.opus_path,
+        keep_opus=options.keep_opus,
+    )
+    convert_to_opus(resolved_input_path, opus_path)
 
     try:
-        tenant_access_token = resolve_tenant_access_token(args)
-        file_name = normalize_opus_file_name(args.file_name or input_path.name)
+        tenant_access_token = resolve_tenant_access_token(
+            tenant_access_token=options.tenant_access_token,
+            app_id=options.app_id,
+            app_secret=options.app_secret,
+            config_path=options.config_path,
+            base_url=base_url,
+            timeout=options.request_timeout,
+        )
+        file_name = normalize_opus_file_name(options.file_name or resolved_input_path.name)
         file_key = upload_opus(
-            base_url=args.base_url,
+            base_url=base_url,
             tenant_access_token=tenant_access_token,
             opus_path=opus_path,
             file_name=file_name,
+            timeout=options.request_timeout,
         )
-        response = send_audio_message(
-            base_url=args.base_url,
+        return send_audio_message(
+            base_url=base_url,
             tenant_access_token=tenant_access_token,
-            receive_id=args.receive_id,
-            receive_id_type=args.receive_id_type,
+            receive_id=options.receive_id,
+            receive_id_type=options.receive_id_type,
             file_key=file_key,
+            timeout=options.request_timeout,
         )
     finally:
         if cleanup_opus and opus_path.exists():
             opus_path.unlink()
 
-    print(json.dumps(response, ensure_ascii=False, indent=2))
-    return 0
+
+def normalize_base_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if not normalized:
+        raise FeishuAudioError("Feishu base URL must not be empty.")
+    return normalized
 
 
-def resolve_opus_path(args: argparse.Namespace, input_path: Path) -> Path:
-    if args.opus_path:
-        opus_path = Path(args.opus_path).expanduser().resolve()
+def resolve_opus_path(
+    *,
+    input_path: Path,
+    explicit_opus_path: Path | None,
+    keep_opus: bool,
+) -> tuple[Path, bool]:
+    if explicit_opus_path:
+        opus_path = explicit_opus_path
         opus_path.parent.mkdir(parents=True, exist_ok=True)
-        return opus_path
-    return Path(tempfile.gettempdir()) / f"{input_path.stem}-{uuid.uuid4().hex}.opus"
+        return opus_path, False
+    temp_path = Path(tempfile.gettempdir()) / f"{input_path.stem}-{uuid.uuid4().hex}.opus"
+    return temp_path, not keep_opus
 
 
 def convert_to_opus(input_path: Path, opus_path: Path) -> None:
@@ -156,30 +222,38 @@ def normalize_opus_file_name(file_name: str) -> str:
     return f"{path.stem}.opus"
 
 
-def resolve_tenant_access_token(args: argparse.Namespace) -> str:
+def resolve_tenant_access_token(
+    *,
+    tenant_access_token: str | None = None,
+    app_id: str | None = None,
+    app_secret: str | None = None,
+    config_path: str = DEFAULT_CONFIG_PATH,
+    base_url: str = FEISHU_BASE_URL,
+    timeout: float = DEFAULT_REQUEST_TIMEOUT,
+) -> str:
     direct_token = (
-        args.tenant_access_token
+        tenant_access_token
         or os.environ.get("FEISHU_TENANT_ACCESS_TOKEN")
         or os.environ.get("LARK_TENANT_ACCESS_TOKEN")
     )
     if direct_token:
         return direct_token
 
-    app_id = args.app_id or os.environ.get("FEISHU_APP_ID") or os.environ.get("LARK_APP_ID")
+    app_id = app_id or os.environ.get("FEISHU_APP_ID") or os.environ.get("LARK_APP_ID")
     app_secret = (
-        args.app_secret
+        app_secret
         or os.environ.get("FEISHU_APP_SECRET")
         or os.environ.get("LARK_APP_SECRET")
     )
 
     if not app_id or not app_secret:
-        config_path = Path(args.config).expanduser()
-        if config_path.is_file():
+        config_path_obj = Path(config_path).expanduser()
+        if config_path_obj.is_file():
             try:
-                config = json.loads(config_path.read_text())
+                config = json.loads(config_path_obj.read_text(encoding="utf-8"))
             except json.JSONDecodeError as exc:
                 raise FeishuAudioError(
-                    f"Invalid JSON in config file: {config_path}"
+                    f"Invalid JSON in config file: {config_path_obj}"
                 ) from exc
             feishu = config.get("channels", {}).get("feishu", {})
             app_id = app_id or feishu.get("appId")
@@ -193,13 +267,16 @@ def resolve_tenant_access_token(args: argparse.Namespace) -> str:
         )
 
     token_response = post_json(
-        f"{args.base_url}/open-apis/auth/v3/tenant_access_token/internal",
+        f"{base_url}/open-apis/auth/v3/tenant_access_token/internal",
         payload={"app_id": app_id, "app_secret": app_secret},
         headers={"Content-Type": "application/json; charset=utf-8"},
+        timeout=timeout,
     )
-    return get_ok_data(token_response, "tenant token").get("tenant_access_token") or fail(
-        "Feishu token response did not include tenant_access_token."
-    )
+    ensure_ok(token_response, "tenant token")
+    token = token_response.get("tenant_access_token")
+    if not isinstance(token, str) or not token:
+        fail("Feishu token response did not include tenant_access_token.")
+    return token
 
 
 def upload_opus(
@@ -208,6 +285,7 @@ def upload_opus(
     tenant_access_token: str,
     opus_path: Path,
     file_name: str,
+    timeout: float = DEFAULT_REQUEST_TIMEOUT,
 ) -> str:
     response = post_multipart(
         f"{base_url}/open-apis/im/v1/files",
@@ -219,6 +297,7 @@ def upload_opus(
         file_path=opus_path,
         upload_file_name=file_name,
         headers={"Authorization": f"Bearer {tenant_access_token}"},
+        timeout=timeout,
     )
     return get_ok_data(response, "file upload").get("file_key") or fail(
         "Feishu upload response did not include data.file_key."
@@ -232,6 +311,7 @@ def send_audio_message(
     receive_id: str,
     receive_id_type: str,
     file_key: str,
+    timeout: float = DEFAULT_REQUEST_TIMEOUT,
 ) -> dict[str, Any]:
     url = (
         f"{base_url}/open-apis/im/v1/messages?"
@@ -249,15 +329,22 @@ def send_audio_message(
             "Authorization": f"Bearer {tenant_access_token}",
             "Content-Type": "application/json; charset=utf-8",
         },
+        timeout=timeout,
     )
     get_ok_data(response, "send audio message")
     return response
 
 
-def post_json(url: str, *, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+def post_json(
+    url: str,
+    *,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    timeout: float = DEFAULT_REQUEST_TIMEOUT,
+) -> dict[str, Any]:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = request.Request(url, data=data, headers=headers, method="POST")
-    return load_json(req)
+    return load_json(req, timeout=timeout)
 
 
 def post_multipart(
@@ -268,6 +355,7 @@ def post_multipart(
     file_path: Path,
     upload_file_name: str,
     headers: dict[str, str],
+    timeout: float = DEFAULT_REQUEST_TIMEOUT,
 ) -> dict[str, Any]:
     boundary = f"----CodexBoundary{uuid.uuid4().hex}"
     body = bytearray()
@@ -300,12 +388,12 @@ def post_multipart(
         "Content-Length": str(len(body)),
     }
     req = request.Request(url, data=bytes(body), headers=req_headers, method="POST")
-    return load_json(req)
+    return load_json(req, timeout=timeout)
 
 
-def load_json(req: request.Request) -> dict[str, Any]:
+def load_json(req: request.Request, *, timeout: float = DEFAULT_REQUEST_TIMEOUT) -> dict[str, Any]:
     try:
-        with request.urlopen(req) as response:
+        with request.urlopen(req, timeout=timeout) as response:
             raw = response.read().decode("utf-8")
     except error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
@@ -323,11 +411,15 @@ def load_json(req: request.Request) -> dict[str, Any]:
         ) from exc
 
 
-def get_ok_data(response: dict[str, Any], action: str) -> dict[str, Any]:
+def ensure_ok(response: dict[str, Any], action: str) -> None:
     code = response.get("code", 0)
     if code not in (0, "0", None):
         msg = response.get("msg") or response.get("message") or "unknown error"
         raise FeishuAudioError(f"Feishu {action} failed with code {code}: {msg}")
+
+
+def get_ok_data(response: dict[str, Any], action: str) -> dict[str, Any]:
+    ensure_ok(response, action)
     data = response.get("data")
     if not isinstance(data, dict):
         raise FeishuAudioError(f"Feishu {action} response did not include a data object.")

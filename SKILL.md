@@ -1,14 +1,15 @@
 ---
 name: feishu-tts
 description: >
-  Convert generated speech or local audio files into Feishu voice bubbles and
-  send them as chat audio messages instead of generic file attachments. Use when
-  the user asks to send TTS output, audio reminders, spoken briefings, or any
-  other playable voice reply into a Feishu conversation. Triggers: "发送语音到飞书",
-  "语音回复", "TTS 发飞书", "send voice reply to Feishu", "send audio bubble".
-  Also use when the user needs local environment setup or readiness checks for
-  Feishu voice-reply delivery on their own computer. NOT for: plain text
-  messages, screenshots, or generic file attachments.
+  Convert text, generated speech, or local audio files into Feishu voice
+  bubbles and send them as chat audio messages instead of generic file
+  attachments. Use when the user asks to send TTS output, audio reminders,
+  spoken briefings, or any other playable voice reply into a Feishu
+  conversation. Triggers: "发送语音到飞书", "语音回复", "TTS 发飞书",
+  "send voice reply to Feishu", "send audio bubble". Also use when the user
+  needs local environment setup or readiness checks for Feishu voice-reply
+  delivery on their own computer. NOT for: plain text messages, screenshots,
+  or generic file attachments.
 ---
 
 # Feishu TTS
@@ -42,11 +43,22 @@ python3 scripts/send_feishu_audio.py \
   --receive-id-type chat_id
 ```
 
+Generate speech and send it directly:
+
+```bash
+python3 scripts/send_feishu_tts.py \
+  --mode api \
+  --text "今天下午四点提醒我发周报。" \
+  --receive-id oc_xxx \
+  --receive-id-type chat_id
+```
+
 The script will:
 
-1. Convert the input audio to mono 16 kHz OPUS with `ffmpeg`
-2. Upload the converted file to `POST /open-apis/im/v1/files` with `file_type=opus`
-3. Send `msg_type=audio` to the specified Feishu target
+1. Generate source audio from text or use the provided local audio file
+2. Convert the source audio to mono 16 kHz OPUS with `ffmpeg`
+3. Upload the converted file to `POST /open-apis/im/v1/files` with `file_type=opus`
+4. Send `msg_type=audio` to the specified Feishu target
 
 Optional environment check:
 
@@ -92,6 +104,27 @@ Prefer one of these sources, in this order:
 
 If only app credentials are available, request a tenant token from `auth/v3/tenant_access_token/internal`.
 
+### 1.5 Generate source audio when the user starts from text
+
+Use:
+
+```bash
+python3 scripts/send_feishu_tts.py --mode api --text "..." --receive-id oc_xxx
+```
+
+or:
+
+```bash
+python3 scripts/send_feishu_tts.py --mode local --text "..." --receive-id oc_xxx
+```
+
+`send_feishu_tts.py` supports:
+
+- remote API mode with `TTS_API_URL`, `TTS_API_KEY`, and optional model/voice env vars
+- local ChatTTS mode with `CHATTTS_URL`
+- `--text-file` when the spoken content is easier to manage as a file
+- `--source-audio-path` and `--keep-source-audio` for debugging intermediate audio
+
 ### 2. Convert audio to Feishu-compatible OPUS
 
 Use:
@@ -131,9 +164,12 @@ For group chats, use `chat_id`. For direct bot delivery to a user, use whichever
 - Ensure `ffmpeg` is installed before running the script.
 - Ensure `python3` is available on the target machine.
 - Ensure the bot has message send and resource upload permissions.
+- If using API TTS mode, ensure `TTS_API_KEY` or `OPENAI_API_KEY` is available.
+- If using local TTS mode, ensure the ChatTTS service is reachable.
 - Prefer chat-scoped delivery for broadcast or briefing scenarios.
 - Keep source audio short and speech-focused; long files work technically but are a poor chat UX.
 - Use `--keep-opus` when you want to inspect or reuse the converted file.
+- Use `--request-timeout` when the local service or upstream API is slow.
 
 If the environment check reports missing dependencies, offer to help the user install them before continuing.
 
@@ -151,6 +187,7 @@ Use that skill to generate speech locally, then use this skill to send the gener
 
 - `check_env.py`: Check whether the local machine has the minimum runtime and config pieces
 - `send_feishu_audio.py`: Convert audio to OPUS, upload it, and send the Feishu audio message
+- `send_feishu_tts.py`: Generate speech from text, then reuse the same OPUS upload/send flow
 
 ### references/
 
